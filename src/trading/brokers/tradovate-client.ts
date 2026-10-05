@@ -1,4 +1,10 @@
-import type { Config } from "./config.js";
+export interface TradovateSettings {
+  baseUrl: string;
+  credentials: {
+    name: string; password: string; appId: string; appVersion: string;
+    cid: string; sec: string; deviceId: string;
+  };
+}
 
 /**
  * Minimal Tradovate REST client: access-token auth with renewal, JSON
@@ -13,7 +19,7 @@ const RENEW_MARGIN_MS = 10 * 60 * 1000;
 export class TradovateClient {
   private token: Token | null = null;
 
-  constructor(private readonly config: Config) {}
+  constructor(private readonly config: TradovateSettings) {}
 
   async get<T = any>(path: string): Promise<T> {
     return this.request<T>("GET", path);

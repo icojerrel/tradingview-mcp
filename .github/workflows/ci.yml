@@ -29,8 +29,11 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Tradovate MCP end-to-end test
-        run: node test/tradovate-e2e.mjs
+      - name: Trading MCP end-to-end tests
+        run: |
+          node test/trading-paper-e2e.mjs
+          node test/trading-alpaca-e2e.mjs
+          node test/trading-tradovate-e2e.mjs
 
       - name: Install Chromium for app e2e test
         run: npx playwright install --with-deps chromium

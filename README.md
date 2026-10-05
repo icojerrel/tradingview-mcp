@@ -38,7 +38,7 @@ MCP Client (Claude, Cursor…)
 - **Pine Scripts** — list and retrieve source code for saved indicators and strategies
 - **Account** — account details
 - **App control** — a second server (`tradingview-app-mcp`) drives the TradingView app itself: symbol, timeframe, indicators, drawings, screenshots ([details](#tradingview-app-control-tradingview-app-mcp))
-- **Order execution** — a third server (`tradovate-mcp`) places futures orders via Tradovate, paper trading by default, with preview/confirm and hard risk limits ([details](#tradovate-orders-tradovate-mcp))
+- **Trading** — a third server (`trading-mcp`) places orders: built-in paper simulator on TradingView prices, Alpaca or Tradovate, with preview/confirm and hard risk limits ([details](#trading-trading-mcp))
 - **Session persistence** — logs in once via headless browser, reuses cookies for subsequent runs
 
 ---
@@ -442,82 +442,97 @@ Starts a real Chromium with a debugging port, opens a stand-in chart page (`test
 
 ---
 
-## Tradovate Orders (`tradovate-mcp`)
+## Trading (`trading-mcp`)
 
-A third MCP server that places futures orders through the official [Tradovate API](https://api.tradovate.com). It starts in **demo (paper trading)** and is built so a model cannot place an order by accident.
+A third MCP server that places orders. You pick a broker with `TRADING_BROKER`, and every broker gets the same safety layer. It starts in **paper trading**:
+
+| Broker | `TRADING_BROKER` | What you need | Markets |
+|--------|------------------|---------------|---------|
+| Built-in simulator | `paper` (default) | Nothing: fills against live TradingView prices | Any TradingView symbol (`NASDAQ:AAPL`, `BINANCE:BTCUSDT`, `CME_MINI:MES1!`) |
+| [Alpaca](https://alpaca.markets) | `alpaca` | Free account, paper API keys | US stocks/ETFs, crypto |
+| [Tradovate](https://www.tradovate.com) | `tradovate` | Demo account + paid API Access add-on | CME futures |
 
 ### Safety model
 
-- **Demo by default.** `TRADOVATE_ENV=live` is *read-only*; orders on live also need `TRADOVATE_LIVE_TRADING=1`. Every tool description shows the mode (`[DEMO/paper]`, `[LIVE (read-only)]`, `[LIVE]`).
-- **Two steps per order.** `tradovate_preview_order` validates and returns a summary with a 6-digit code, and sends nothing. `tradovate_confirm_order` places it. Codes are single use and expire after 120 s.
-- **Hard limits**, checked at preview *and again* at confirm: quantity per order, net position per contract (orders that shrink a position are always allowed), orders per day, and an optional product allow-list.
-- **Journal.** Every placed, rejected or cancelled order and every liquidation is appended to `.tradovate_orders.jsonl`. The daily limit is counted from it, so it survives restarts.
-- Orders are flagged `isAutomated: true`, as Tradovate/CME require for API orders.
+- **Paper first.** The paper broker is never live. Alpaca uses `ALPACA_ENV=paper` and Tradovate uses `TRADOVATE_ENV=demo` by default. A *live* account is **read-only** unless `TRADING_LIVE_TRADING=1` is also set. Every tool description shows the mode: `[PAPER (simulated)]`, `[alpaca PAPER]`, `[tradovate LIVE (read-only)]`, …
+- **Two steps per order.** `trade_preview_order` validates the order and returns a summary with a 6-digit code, but sends nothing. `trade_confirm_order` places it. Codes are single use and expire after 120 s.
+- **Hard limits**, checked at preview *and again* at confirm: quantity per order, net position per symbol (orders that shrink a position are always allowed), orders per day, and an optional product allow-list.
+- **Journal.** Every placed, rejected or cancelled order and every close is appended to `.trading_journal.jsonl`. The daily limit is counted from it, so it survives restarts.
 
 ### Setup
-
-1. Make a Tradovate demo account. Enable **API Access** (a paid add-on) and create an API key under *Application Settings → API Access*: that gives the `cid` and `sec`.
-2. Register the server:
 
 ```json
 {
   "mcpServers": {
-    "tradovate": {
+    "trading": {
       "command": "node",
-      "args": ["/absolute/path/to/tradingview-mcp/dist/tradovate/index.js"],
+      "args": ["/absolute/path/to/tradingview-mcp/dist/trading/index.js"],
       "env": {
-        "TRADOVATE_ENV": "demo",
-        "TRADOVATE_USERNAME": "your_username",
-        "TRADOVATE_PASSWORD": "your_password",
-        "TRADOVATE_CID": "1234",
-        "TRADOVATE_SEC": "your-api-secret",
-        "TRADOVATE_MAX_ORDER_QTY": "1",
-        "TRADOVATE_MAX_POSITION": "2",
-        "TRADOVATE_ALLOWED_PRODUCTS": "MES,MNQ"
+        "TRADING_BROKER": "paper",
+        "TRADING_MAX_ORDER_QTY": "1",
+        "TRADING_MAX_POSITION": "2"
       }
     }
   }
 }
 ```
 
+- **Alpaca:** create a free account at alpaca.markets, open the *Paper* account, generate API keys. Then set `TRADING_BROKER=alpaca`, `ALPACA_API_KEY_ID` and `ALPACA_API_SECRET_KEY`.
+- **Tradovate:** set `TRADING_BROKER=tradovate`, `TRADOVATE_USERNAME`, `TRADOVATE_PASSWORD`, `TRADOVATE_CID` and `TRADOVATE_SEC` (API key from *Application Settings → API Access*). Optional: `TRADOVATE_ACCOUNT`, `TRADOVATE_APP_ID`, `TRADOVATE_APP_VERSION`, `TRADOVATE_DEVICE_ID`.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `TRADING_BROKER` | `paper` | `paper`, `alpaca` or `tradovate` |
+| `TRADING_LIVE_TRADING` | — | `1` = allow orders on a live account |
+| `TRADING_MAX_ORDER_QTY` | `1` | Max quantity per order |
+| `TRADING_MAX_POSITION` | `2` | Max absolute net position per symbol |
+| `TRADING_MAX_ORDERS_PER_DAY` | `20` | Max orders placed per UTC day |
+| `TRADING_ALLOWED_PRODUCTS` | all | Comma-separated, e.g. `AAPL,BTCUSDT` or `MES,MNQ` |
+| `TRADING_CONFIRM_TTL_SEC` | `120` | Lifetime of a confirmation code |
+| `TRADING_JOURNAL_FILE` | `.trading_journal.jsonl` | Order journal |
+| `TRADING_PAPER_START_CASH` | `100000` | Starting equity of the simulator |
+| `TRADING_PAPER_STATE_FILE` | `.paper_account.json` | Simulator account (positions, orders, fills) |
+| `TRADING_PAPER_POLL_SEC` | `15` | How often working orders are checked against the price |
+| `TRADING_PAPER_POINT_VALUES` | `1` | Futures multipliers, e.g. `CME_MINI:MES1!=5,CME_MINI:MNQ1!=2` |
+| `TRADING_PAPER_PRICES_FILE` | — | Offline mode: take prices from a JSON file `{"NASDAQ:AAPL": 190}` instead of TradingView |
+| `ALPACA_ENV` | `paper` | `paper` or `live` |
 | `TRADOVATE_ENV` | `demo` | `demo` or `live` |
-| `TRADOVATE_LIVE_TRADING` | — | `1` = allow orders on live |
-| `TRADOVATE_USERNAME` / `TRADOVATE_PASSWORD` | — | Login |
-| `TRADOVATE_CID` / `TRADOVATE_SEC` | — | API key |
-| `TRADOVATE_APP_ID` / `TRADOVATE_APP_VERSION` / `TRADOVATE_DEVICE_ID` | `tradingview-mcp` / `1.0` / `tradingview-mcp` | Sent with the login |
-| `TRADOVATE_ACCOUNT` | first account | Account name, e.g. `DEMO123456` |
-| `TRADOVATE_MAX_ORDER_QTY` | `1` | Max contracts per order |
-| `TRADOVATE_MAX_POSITION` | `2` | Max absolute net position per contract |
-| `TRADOVATE_MAX_ORDERS_PER_DAY` | `20` | Max orders placed per UTC day |
-| `TRADOVATE_ALLOWED_PRODUCTS` | all | Comma-separated roots, e.g. `MES,MNQ` |
-| `TRADOVATE_CONFIRM_TTL_SEC` | `120` | Lifetime of a confirmation code |
-| `TRADOVATE_JOURNAL_FILE` | `.tradovate_orders.jsonl` | Order journal |
 
 ### Tools
 
 | Tool | What it does |
 |------|--------------|
-| `tradovate_status` | Mode, account, cash balance / P&L, limits, orders placed today |
-| `tradovate_positions` | Open positions |
-| `tradovate_orders` | Working orders with quantity and prices |
-| `tradovate_fills` | Executions |
-| `tradovate_find_contract` | `MES` → `MESZ6`, `MESH7`, … |
-| `tradovate_preview_order` | Step 1: validate + summary + confirmation code (Market / Limit / Stop / StopLimit, optional take-profit / stop-loss bracket) |
-| `tradovate_confirm_order` | Step 2: place the previewed order |
-| `tradovate_cancel_order` | Cancel a working order |
-| `tradovate_close_position` | Flatten a position at market |
+| `trade_status` | Broker, mode, balance / P&L, limits, orders placed today |
+| `trade_positions` | Open positions |
+| `trade_orders` | Working orders |
+| `trade_fills` | Executions |
+| `trade_find_symbol` | Symbol lookup (Alpaca, Tradovate) |
+| `trade_preview_order` | Step 1: validate + summary + confirmation code (Market / Limit / Stop / StopLimit, optional take-profit / stop-loss) |
+| `trade_confirm_order` | Step 2: place the previewed order |
+| `trade_cancel_order` | Cancel a working order |
+| `trade_close_position` | Flatten a position at market |
 
-The position limit counts *filled* positions, not working orders that have not filled yet.
+### How the paper simulator fills
+
+Simple on purpose:
+
+- **Market** orders fill at the last TradingView price.
+- **Limit** orders fill at the last price if they can fill when placed; otherwise at the limit price once the price reaches it.
+- **Stop** orders fill at the last price once it reaches the stop. A stop-limit becomes a limit at that point.
+- **Take-profit and stop-loss** become an OCO pair once the entry fills: when one fills, the other is cancelled. Closing a position cancels its attached exits.
+- **Day** orders expire at the end of the UTC day.
+- **When orders are checked:** on every tool call, and every `TRADING_PAPER_POLL_SEC` seconds while the server runs. A spike between two checks can be missed.
+- **Not simulated:** slippage, commissions, market hours, partial fills, margin.
+
+The position limit counts *filled* positions, not working orders.
 
 ### Testing
 
 ```bash
-npm run test:tradovate
+npm run test:trading
 ```
 
-Runs the server against a local stand-in for the Tradovate REST API and covers every tool and safeguard (27 checks). It does not contact Tradovate. Try your first orders on the demo account and compare them with what the Tradovate app shows.
+Runs the server with each broker. The paper broker gets prices from a file, and Alpaca and Tradovate run against local stand-ins of their REST APIs. Every tool and every safeguard is covered (61 checks). The tests do not contact TradingView, Alpaca or Tradovate.
 
 ---
 
@@ -556,11 +571,12 @@ src/
 │   ├── index.ts      # MCP entrypoint and tool definitions
 │   ├── connection.ts # Attach to the app (CDP) or launch a browser window
 │   └── chart.ts      # Chart operations via window.TradingViewApi
-└── tradovate/     # tradovate-mcp — order execution via the Tradovate API
+└── trading/       # trading-mcp — order execution with a broker-independent safety layer
     ├── index.ts      # MCP entrypoint and tool definitions
-    ├── config.ts     # Environment, credentials and risk limits
-    ├── client.ts     # REST client: auth, token renewal, rate-limit penalty
-    └── trading.ts    # Accounts, positions, preview/confirm orders, journal
+    ├── config.ts     # Broker choice and risk limits
+    ├── safety.ts     # Preview/confirm, limits, live gate, journal
+    ├── broker.ts     # Broker interface
+    └── brokers/      # paper.ts (simulator), alpaca.ts, tradovate.ts (+ tradovate-client.ts)
 ```
 
 ---

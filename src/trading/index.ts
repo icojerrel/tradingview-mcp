@@ -8,23 +8,37 @@ import {
 import { z } from "zod";
 
 import { loadConfig } from "./config.js";
-import { Trading } from "./trading.js";
+import { Trading } from "./safety.js";
+import type { Broker } from "./broker.js";
+import { PaperBroker } from "./brokers/paper.js";
+import { AlpacaBroker } from "./brokers/alpaca.js";
+import { TradovateBroker } from "./brokers/tradovate.js";
 
 const config = loadConfig();
-const trading = new Trading(config);
-const ENV_LABEL = config.env === "demo" ? "DEMO/paper" : config.tradingEnabled ? "LIVE" : "LIVE (read-only)";
+const broker: Broker =
+  config.broker === "alpaca" ? new AlpacaBroker()
+  : config.broker === "tradovate" ? new TradovateBroker()
+  : new PaperBroker();
+const trading = new Trading(config, broker);
+const MODE = trading.modeLabel;
+
+const SYMBOL_HELP: Record<string, string> = {
+  paper: "TradingView symbol EXCHANGE:TICKER, e.g. NASDAQ:AAPL, BINANCE:BTCUSDT, CME_MINI:MES1!",
+  alpaca: "Alpaca symbol, e.g. AAPL, SPY, BTC/USD",
+  tradovate: "Full futures contract, e.g. MESZ6, MNQH7 (see trade_find_symbol)",
+};
 
 const server = new Server(
-  { name: "tradovate-mcp", version: "0.1.0" },
+  { name: "trading-mcp", version: "0.1.0" },
   { capabilities: { tools: {} } }
 );
 
 // ─── Tool definitions ────────────────────────────────────────────────────────
 
 const orderProperties = {
-  symbol: { type: "string", description: "Full contract name, e.g. MESZ6, MNQH7 (see tradovate_find_contract)" },
+  symbol: { type: "string", description: SYMBOL_HELP[broker.name] },
   action: { type: "string", enum: ["Buy", "Sell"] },
-  qty: { type: "integer", minimum: 1 },
+  qty: { type: "number", exclusiveMinimum: 0 },
   orderType: { type: "string", enum: ["Market", "Limit", "Stop", "StopLimit"] },
   price: { type: "number", description: "Limit price (Limit, StopLimit)" },
   stopPrice: { type: "number", description: "Trigger price (Stop, StopLimit)" },
@@ -35,50 +49,52 @@ const orderProperties = {
 
 const tools = [
   {
-    name: "tradovate_status",
-    description: `Tradovate account status [${ENV_LABEL}]: environment, account, cash balance / P&L, risk limits, orders placed today`,
+    name: "trade_status",
+    description: `Trading account status [${MODE}]: broker, mode, balance / P&L, risk limits, orders placed today`,
     inputSchema: { type: "object", properties: {}, required: [] },
   },
   {
-    name: "tradovate_positions",
-    description: "List open positions",
+    name: "trade_positions",
+    description: `List open positions [${MODE}]`,
     inputSchema: { type: "object", properties: {}, required: [] },
   },
   {
-    name: "tradovate_orders",
-    description: "List working (open) orders",
+    name: "trade_orders",
+    description: `List working (open) orders [${MODE}]`,
     inputSchema: { type: "object", properties: {}, required: [] },
   },
   {
-    name: "tradovate_fills",
-    description: "List fills (executions) of this session",
+    name: "trade_fills",
+    description: `List fills (executions) [${MODE}]`,
     inputSchema: { type: "object", properties: {}, required: [] },
   },
+  ...(broker.findSymbols
+    ? [{
+      name: "trade_find_symbol",
+      description: `Look up tradable symbols at ${broker.name}`,
+      inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+    }]
+    : []),
   {
-    name: "tradovate_find_contract",
-    description: "Find futures contracts by text, e.g. 'MES' → MESZ6, MESH7",
-    inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
-  },
-  {
-    name: "tradovate_preview_order",
+    name: "trade_preview_order",
     description:
-      `Step 1 of 2 [${ENV_LABEL}]: validate an order against the risk limits and return a summary plus a ` +
-      "confirmation code. Sends NOTHING to the exchange. Show the summary to the user and only confirm after they agree.",
+      `Step 1 of 2 [${MODE}]: validate an order against the risk limits and return a summary plus a ` +
+      "confirmation code. Sends NOTHING. Show the summary to the user and only confirm after they agree.",
     inputSchema: { type: "object", properties: orderProperties, required: ["symbol", "action", "qty", "orderType"] },
   },
   {
-    name: "tradovate_confirm_order",
-    description: `Step 2 of 2 [${ENV_LABEL}]: place a previewed order using its confirmation code (single use, expires)`,
+    name: "trade_confirm_order",
+    description: `Step 2 of 2 [${MODE}]: place a previewed order using its confirmation code (single use, expires)`,
     inputSchema: { type: "object", properties: { code: { type: "string" } }, required: ["code"] },
   },
   {
-    name: "tradovate_cancel_order",
-    description: "Cancel a working order by order id",
-    inputSchema: { type: "object", properties: { orderId: { type: "integer" } }, required: ["orderId"] },
+    name: "trade_cancel_order",
+    description: `Cancel a working order by order id [${MODE}]`,
+    inputSchema: { type: "object", properties: { orderId: { type: "string" } }, required: ["orderId"] },
   },
   {
-    name: "tradovate_close_position",
-    description: `Flatten the open position in a contract at market [${ENV_LABEL}]`,
+    name: "trade_close_position",
+    description: `Flatten the open position in a symbol at market [${MODE}]`,
     inputSchema: { type: "object", properties: { symbol: { type: "string" } }, required: ["symbol"] },
   },
 ];
@@ -92,7 +108,7 @@ const json = (value: unknown) => ({ content: [{ type: "text", text: JSON.stringi
 const orderZ = z.object({
   symbol: z.string().min(1),
   action: z.enum(["Buy", "Sell"]),
-  qty: z.number().int().min(1),
+  qty: z.number().positive(),
   orderType: z.enum(["Market", "Limit", "Stop", "StopLimit"]),
   price: z.number().positive().optional(),
   stopPrice: z.number().positive().optional(),
@@ -106,29 +122,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     switch (name) {
-      case "tradovate_status":
+      case "trade_status":
         return json(await trading.status());
-      case "tradovate_positions":
+      case "trade_positions":
         return json(await trading.positions());
-      case "tradovate_orders":
+      case "trade_orders":
         return json(await trading.workingOrders());
-      case "tradovate_fills":
+      case "trade_fills":
         return json(await trading.fills());
-      case "tradovate_find_contract": {
+      case "trade_find_symbol": {
         const { text } = z.object({ text: z.string().min(1) }).parse(args);
-        return json(await trading.findContracts(text));
+        return json(await trading.findSymbols(text));
       }
-      case "tradovate_preview_order":
+      case "trade_preview_order":
         return json(await trading.preview(orderZ.parse(args)));
-      case "tradovate_confirm_order": {
+      case "trade_confirm_order": {
         const { code } = z.object({ code: z.string().min(1) }).parse(args);
         return json(await trading.confirm(code));
       }
-      case "tradovate_cancel_order": {
-        const { orderId } = z.object({ orderId: z.number().int() }).parse(args);
-        return json(await trading.cancel(orderId));
+      case "trade_cancel_order": {
+        const { orderId } = z.object({ orderId: z.union([z.string(), z.number()]) }).parse(args);
+        return json(await trading.cancel(String(orderId)));
       }
-      case "tradovate_close_position": {
+      case "trade_close_position": {
         const { symbol } = z.object({ symbol: z.string().min(1) }).parse(args);
         return json(await trading.closePosition(symbol));
       }
@@ -149,7 +165,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`Tradovate MCP server running on stdio [${ENV_LABEL}]`);
+  console.error(`Trading MCP server running on stdio [${MODE}]`);
 }
 
 main().catch((err) => {

@@ -4,4 +4,5 @@ dist/
 .tv_session.json
 *.js.map
 scripts/
-.tradovate_orders.jsonl
+.trading_journal.jsonl
+.paper_account.json
