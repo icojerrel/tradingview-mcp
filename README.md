@@ -38,6 +38,7 @@ MCP Client (Claude, Cursor…)
 - **Pine Scripts** — list and retrieve source code for saved indicators and strategies
 - **Account** — account details
 - **App control** — a second server (`tradingview-app-mcp`) drives the TradingView app itself: symbol, timeframe, indicators, drawings, screenshots ([details](#tradingview-app-control-tradingview-app-mcp))
+- **Order execution** — a third server (`tradovate-mcp`) places futures orders via Tradovate, paper trading by default, with preview/confirm and hard risk limits ([details](#tradovate-orders-tradovate-mcp))
 - **Session persistence** — logs in once via headless browser, reuses cookies for subsequent runs
 
 ---
@@ -441,6 +442,85 @@ Starts a real Chromium with a debugging port, opens a stand-in chart page (`test
 
 ---
 
+## Tradovate Orders (`tradovate-mcp`)
+
+A third MCP server that places futures orders through the official [Tradovate API](https://api.tradovate.com). It starts in **demo (paper trading)** and is built so a model cannot place an order by accident.
+
+### Safety model
+
+- **Demo by default.** `TRADOVATE_ENV=live` is *read-only*; orders on live also need `TRADOVATE_LIVE_TRADING=1`. Every tool description shows the mode (`[DEMO/paper]`, `[LIVE (read-only)]`, `[LIVE]`).
+- **Two steps per order.** `tradovate_preview_order` validates and returns a summary with a 6-digit code, and sends nothing. `tradovate_confirm_order` places it. Codes are single use and expire after 120 s.
+- **Hard limits**, checked at preview *and again* at confirm: quantity per order, net position per contract (orders that shrink a position are always allowed), orders per day, and an optional product allow-list.
+- **Journal.** Every placed, rejected or cancelled order and every liquidation is appended to `.tradovate_orders.jsonl`. The daily limit is counted from it, so it survives restarts.
+- Orders are flagged `isAutomated: true`, as Tradovate/CME require for API orders.
+
+### Setup
+
+1. Make a Tradovate demo account. Enable **API Access** (a paid add-on) and create an API key under *Application Settings → API Access*: that gives the `cid` and `sec`.
+2. Register the server:
+
+```json
+{
+  "mcpServers": {
+    "tradovate": {
+      "command": "node",
+      "args": ["/absolute/path/to/tradingview-mcp/dist/tradovate/index.js"],
+      "env": {
+        "TRADOVATE_ENV": "demo",
+        "TRADOVATE_USERNAME": "your_username",
+        "TRADOVATE_PASSWORD": "your_password",
+        "TRADOVATE_CID": "1234",
+        "TRADOVATE_SEC": "your-api-secret",
+        "TRADOVATE_MAX_ORDER_QTY": "1",
+        "TRADOVATE_MAX_POSITION": "2",
+        "TRADOVATE_ALLOWED_PRODUCTS": "MES,MNQ"
+      }
+    }
+  }
+}
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TRADOVATE_ENV` | `demo` | `demo` or `live` |
+| `TRADOVATE_LIVE_TRADING` | — | `1` = allow orders on live |
+| `TRADOVATE_USERNAME` / `TRADOVATE_PASSWORD` | — | Login |
+| `TRADOVATE_CID` / `TRADOVATE_SEC` | — | API key |
+| `TRADOVATE_APP_ID` / `TRADOVATE_APP_VERSION` / `TRADOVATE_DEVICE_ID` | `tradingview-mcp` / `1.0` / `tradingview-mcp` | Sent with the login |
+| `TRADOVATE_ACCOUNT` | first account | Account name, e.g. `DEMO123456` |
+| `TRADOVATE_MAX_ORDER_QTY` | `1` | Max contracts per order |
+| `TRADOVATE_MAX_POSITION` | `2` | Max absolute net position per contract |
+| `TRADOVATE_MAX_ORDERS_PER_DAY` | `20` | Max orders placed per UTC day |
+| `TRADOVATE_ALLOWED_PRODUCTS` | all | Comma-separated roots, e.g. `MES,MNQ` |
+| `TRADOVATE_CONFIRM_TTL_SEC` | `120` | Lifetime of a confirmation code |
+| `TRADOVATE_JOURNAL_FILE` | `.tradovate_orders.jsonl` | Order journal |
+
+### Tools
+
+| Tool | What it does |
+|------|--------------|
+| `tradovate_status` | Mode, account, cash balance / P&L, limits, orders placed today |
+| `tradovate_positions` | Open positions |
+| `tradovate_orders` | Working orders with quantity and prices |
+| `tradovate_fills` | Executions |
+| `tradovate_find_contract` | `MES` → `MESZ6`, `MESH7`, … |
+| `tradovate_preview_order` | Step 1: validate + summary + confirmation code (Market / Limit / Stop / StopLimit, optional take-profit / stop-loss bracket) |
+| `tradovate_confirm_order` | Step 2: place the previewed order |
+| `tradovate_cancel_order` | Cancel a working order |
+| `tradovate_close_position` | Flatten a position at market |
+
+The position limit counts *filled* positions, not working orders that have not filled yet.
+
+### Testing
+
+```bash
+npm run test:tradovate
+```
+
+Runs the server against a local stand-in for the Tradovate REST API and covers every tool and safeguard (27 checks). It does not contact Tradovate. Try your first orders on the demo account and compare them with what the Tradovate app shows.
+
+---
+
 ## Symbol Format
 
 TradingView uses an `EXCHANGE:TICKER` format for all symbols:
@@ -472,10 +552,15 @@ src/
 ├── layouts.ts     # Chart layout read operations
 ├── scripts.ts     # Pine Script source retrieval
 ├── account.ts     # Account info
-└── app/           # tradingview-app-mcp — controls the TradingView app over CDP
+├── app/           # tradingview-app-mcp — controls the TradingView app over CDP
+│   ├── index.ts      # MCP entrypoint and tool definitions
+│   ├── connection.ts # Attach to the app (CDP) or launch a browser window
+│   └── chart.ts      # Chart operations via window.TradingViewApi
+└── tradovate/     # tradovate-mcp — order execution via the Tradovate API
     ├── index.ts      # MCP entrypoint and tool definitions
-    ├── connection.ts # Attach to the app (CDP) or launch a browser window
-    └── chart.ts      # Chart operations via window.TradingViewApi
+    ├── config.ts     # Environment, credentials and risk limits
+    ├── client.ts     # REST client: auth, token renewal, rate-limit penalty
+    └── trading.ts    # Accounts, positions, preview/confirm orders, journal
 ```
 
 ---

@@ -4,3 +4,4 @@ dist/
 .tv_session.json
 *.js.map
 scripts/
+.tradovate_orders.jsonl
