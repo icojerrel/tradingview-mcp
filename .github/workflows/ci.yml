@@ -29,6 +29,12 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Install Chromium for app e2e test
+        run: npx playwright install --with-deps chromium
+
+      - name: App MCP end-to-end test
+        run: node test/app-e2e.mjs
+
       - name: Upload dist artifact
         uses: actions/upload-artifact@v4
         with:

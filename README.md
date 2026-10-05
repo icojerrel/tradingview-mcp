@@ -37,6 +37,7 @@ MCP Client (Claude, Cursor…)
 - **Chart Layouts** — list and inspect saved chart layouts
 - **Pine Scripts** — list and retrieve source code for saved indicators and strategies
 - **Account** — account details
+- **App control** — a second server (`tradingview-app-mcp`) drives the TradingView app itself: symbol, timeframe, indicators, drawings, screenshots ([details](#tradingview-app-control-tradingview-app-mcp))
 - **Session persistence** — logs in once via headless browser, reuses cookies for subsequent runs
 
 ---
@@ -355,6 +356,91 @@ Clears the saved session. The next tool call will trigger a fresh Playwright log
 
 ---
 
+## TradingView App Control (`tradingview-app-mcp`)
+
+A second MCP server in this repo that **operates the TradingView app itself** — the chart you are looking at — instead of calling the data API. Ask Claude to "switch to BTCUSDT on 4h, add an RSI(21) and draw a horizontal line at 60k" and you see it happen in your own TradingView window.
+
+It attaches to the app over the Chrome DevTools Protocol and drives the chart API that TradingView exposes in the page (`window.TradingViewApi`). Both servers can be configured side by side.
+
+```
+MCP Client ──stdio──▶ tradingview-app-mcp ──CDP (port 9222)──▶ TradingView Desktop / browser tab
+```
+
+### Setup
+
+**1. Start TradingView Desktop with remote debugging enabled** (and open a chart):
+
+| OS | Command |
+|----|---------|
+| Windows | `"%LOCALAPPDATA%\TradingView\TradingView.exe" --remote-debugging-port=9222` |
+| macOS | `open -a TradingView --args --remote-debugging-port=9222` |
+| Linux | `tradingview --remote-debugging-port=9222` |
+
+No Desktop app? Set `TV_APP_MODE=launch` and the server opens its own Chromium window on tradingview.com/chart, re-using the cookies in `.tv_session.json` (from `npm run login`) so you are logged in.
+
+**2. Build and register the server:**
+
+```bash
+npm install && npm run build
+```
+
+```json
+{
+  "mcpServers": {
+    "tradingview-app": {
+      "command": "node",
+      "args": ["/absolute/path/to/tradingview-mcp/dist/app/index.js"],
+      "env": { "TV_CDP_URL": "http://127.0.0.1:9222" }
+    }
+  }
+}
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TV_APP_MODE` | `cdp` | `cdp` = attach to a running app; `launch` = open own Chromium window |
+| `TV_CDP_URL` | `http://127.0.0.1:9222` | Debugging endpoint of the app (cdp mode) |
+| `TV_APP_URL_MATCH` | `tradingview\.com/chart` | Regex used to pick the chart tab/window |
+| `TV_CHART_URL` | `https://www.tradingview.com/chart/` | Page opened in launch mode (e.g. your own layout URL) |
+| `TV_APP_HEADLESS` | — | `1` = launch mode without a visible window |
+| `TV_BROWSER_PATH` | Playwright Chromium | Browser binary for launch mode |
+| `TV_APP_ALLOW_EVAL` | — | `1` = expose `app_evaluate` (runs arbitrary JavaScript in the app) |
+
+### Tools
+
+| Tool | What it does |
+|------|--------------|
+| `app_status` | Connect and report symbol, timeframe, chart type, indicators, drawings, visible range |
+| `app_reconnect` | Reconnect after restarting the app or switching tabs |
+| `chart_set_symbol` | Change symbol (`BINANCE:BTCUSDT`, `NASDAQ:AAPL`, …) |
+| `chart_set_timeframe` | Change timeframe (`1m` `5m` `15m` `1h` `4h` `1D` `1W` `1M`, or native `60`, `240`) |
+| `chart_set_type` | Candles, bars, line, area, heikin_ashi, hollow_candles, baseline, renko, … |
+| `chart_set_visible_range` | Zoom/scroll to a `from`/`to` Unix time range |
+| `chart_execute_action` | Run a built-in action id (`chartReset`, `undo`, `redo`, `insertIndicator`, …) |
+| `chart_get_bars` | Read the OHLCV bars loaded in the chart |
+| `chart_screenshot` | PNG of the chart (or whole window) returned as an image |
+| `indicator_add` | Add a built-in indicator by name with optional inputs/style overrides |
+| `indicator_get` / `indicator_update` | Read or change inputs and visibility |
+| `indicator_remove` | Remove an indicator |
+| `drawing_create` | Horizontal/trend lines, rays, rectangles, text, fib retracements, long/short positions, … |
+| `drawing_remove` | Remove specific drawings, or all of them |
+| `app_press_keys` | Send keyboard shortcuts (`Alt+H`, `Control+S`, `Escape`, …) |
+| `app_evaluate` | *(opt-in)* Run JavaScript in the app |
+
+Closing the MCP server only drops the debugging connection; your TradingView app keeps running.
+
+### Testing
+
+```bash
+npm run test:app
+```
+
+Starts a real Chromium with a debugging port, opens a stand-in chart page (`test/fixtures/mock-chart.html`) that implements the same `TradingViewApi` calls, and drives every tool through the MCP protocol. It does not contact tradingview.com, so it verifies the server and its calling conventions — not TradingView's live app. If TradingView changes its in-page API, a tool returns an error naming the call that failed.
+
+---
+
 ## Symbol Format
 
 TradingView uses an `EXCHANGE:TICKER` format for all symbols:
@@ -385,7 +471,11 @@ src/
 ├── news.ts        # News headlines and community ideas
 ├── layouts.ts     # Chart layout read operations
 ├── scripts.ts     # Pine Script source retrieval
-└── account.ts     # Account info
+├── account.ts     # Account info
+└── app/           # tradingview-app-mcp — controls the TradingView app over CDP
+    ├── index.ts      # MCP entrypoint and tool definitions
+    ├── connection.ts # Attach to the app (CDP) or launch a browser window
+    └── chart.ts      # Chart operations via window.TradingViewApi
 ```
 
 ---

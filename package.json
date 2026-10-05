@@ -1,20 +1,24 @@
 {
   "name": "tradingview-mcp",
   "version": "0.1.0",
-  "description": "MCP server for TradingView alerts and watchlists",
+  "description": "MCP servers for TradingView: account data (REST API) and live control of the TradingView app",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "tradingview-mcp": "dist/index.js"
+    "tradingview-mcp": "dist/index.js",
+    "tradingview-app-mcp": "dist/app/index.js"
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
+    "start:app": "node dist/app/index.js",
     "login": "node dist/login.js",
     "login:interactive": "node dist/login.js --interactive",
     "login:import": "node dist/login.js --import-cookies",
-    "inspector": "npx @modelcontextprotocol/inspector node dist/index.js"
+    "inspector": "npx @modelcontextprotocol/inspector node dist/index.js",
+    "inspector:app": "npx @modelcontextprotocol/inspector node dist/app/index.js",
+    "test:app": "npm run build && node test/app-e2e.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

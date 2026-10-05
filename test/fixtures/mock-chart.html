@@ -1,0 +1,162 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Mock TradingView chart</title>
+<style>
+  body { margin: 0; background: #131722; color: #d1d4dc; font: 13px sans-serif; }
+  .layout__area--center { position: absolute; inset: 0; }
+  .chart-container { position: absolute; inset: 0; }
+  canvas { width: 100%; height: 100%; display: block; }
+</style>
+</head>
+<body>
+<!--
+  Stand-in for the TradingView chart page, used by test/app-e2e.mjs because
+  tradingview.com itself is not reachable from CI. It implements the subset of
+  window.TradingViewApi (Charting Library widget API) that src/app/chart.ts uses,
+  with the same calling conventions (callbacks, promises, entity ids).
+-->
+<div class="layout__area--center"><div class="chart-container active"><canvas id="c"></canvas></div></div>
+<script>
+(() => {
+  const RES_SECONDS = { "1": 60, "5": 300, "15": 900, "60": 3600, "240": 14400, "1D": 86400, "1W": 604800, "1M": 2592000 };
+  const KNOWN_STUDIES = {
+    "Relative Strength Index": { short: "RSI", inputs: { length: 14 } },
+    "Moving Average Exponential": { short: "EMA", inputs: { length: 9 } },
+    "MACD": { short: "MACD", inputs: { fast_length: 12, slow_length: 26 } },
+    "Volume": { short: "Vol", inputs: {} },
+  };
+  const ONE_POINT = ["horizontal_line", "vertical_line", "text", "arrow_up", "arrow_down", "flag"];
+  const MULTI_POINT = ["trend_line", "rectangle", "fib_retracement"];
+
+  let nextId = 1;
+  const state = {
+    symbol: "NASDAQ:AAPL", resolution: "1D", chartType: 1,
+    studies: [], shapes: [], range: null, actions: [], bars: [],
+  };
+  window.__mockState = state;
+
+  function genBars() {
+    const step = RES_SECONDS[state.resolution] ?? 86400;
+    let seed = [...state.symbol].reduce((a, c) => a + c.charCodeAt(0), 0);
+    const rnd = () => (seed = (seed * 9301 + 49297) % 233280) / 233280;
+    const end = Math.floor(Date.UTC(2026, 0, 1) / 1000);
+    let price = 100 + rnd() * 100;
+    state.bars = [];
+    for (let i = 299; i >= 0; i--) {
+      const open = price;
+      const close = open * (1 + (rnd() - 0.5) * 0.04);
+      const high = Math.max(open, close) * (1 + rnd() * 0.01);
+      const low = Math.min(open, close) * (1 - rnd() * 0.01);
+      state.bars.push([end - i * step, open, high, low, close, Math.round(rnd() * 1e6)]);
+      price = close;
+    }
+    state.range = { from: state.bars[200][0], to: state.bars[299][0] };
+  }
+
+  function draw() {
+    const cv = document.getElementById("c");
+    const w = cv.width = cv.clientWidth, h = cv.height = cv.clientHeight;
+    const g = cv.getContext("2d");
+    g.fillStyle = "#131722"; g.fillRect(0, 0, w, h);
+    const vis = state.bars.filter((b) => b[0] >= state.range.from && b[0] <= state.range.to);
+    if (!vis.length) return;
+    const lo = Math.min(...vis.map((b) => b[3])), hi = Math.max(...vis.map((b) => b[2]));
+    const y = (p) => h - 40 - ((p - lo) / (hi - lo || 1)) * (h - 80);
+    const bw = w / vis.length;
+    vis.forEach((b, i) => {
+      g.strokeStyle = g.fillStyle = b[4] >= b[1] ? "#26a69a" : "#ef5350";
+      const x = i * bw + bw / 2;
+      g.beginPath(); g.moveTo(x, y(b[2])); g.lineTo(x, y(b[3])); g.stroke();
+      if (state.chartType === 1) g.fillRect(x - bw * 0.35, Math.min(y(b[1]), y(b[4])), bw * 0.7, Math.abs(y(b[1]) - y(b[4])) || 1);
+    });
+    for (const s of state.shapes) {
+      if (s.name === "horizontal_line") {
+        g.strokeStyle = "#2962ff"; g.beginPath(); g.moveTo(0, y(s.points[0].price)); g.lineTo(w, y(s.points[0].price)); g.stroke();
+      }
+    }
+    g.fillStyle = "#d1d4dc"; g.font = "bold 20px sans-serif";
+    g.fillText(`${state.symbol} · ${state.resolution} · ${state.studies.map((s) => s.name).join(", ")}`, 16, 28);
+  }
+
+  const chart = {
+    symbol: () => state.symbol,
+    resolution: () => state.resolution,
+    chartType: () => state.chartType,
+    setChartType: (t) => { state.chartType = t; draw(); },
+    setSymbol(sym, cb) {
+      // Real app: async load, then invokes the callback.
+      setTimeout(() => { state.symbol = sym.includes(":") ? sym : `NASDAQ:${sym}`; genBars(); draw(); cb && cb(); }, 50);
+    },
+    setResolution(res, cb) {
+      if (!RES_SECONDS[res]) throw new Error(`unsupported resolution ${res}`);
+      setTimeout(() => { state.resolution = res; genBars(); draw(); cb && cb(); }, 50);
+    },
+    dataReady: (cb) => { setTimeout(cb, 10); return false; },
+    getVisibleRange: () => ({ ...state.range }),
+    setVisibleRange: (r) => new Promise((res) => setTimeout(() => { state.range = { from: r.from, to: r.to }; draw(); res(); }, 10)),
+    executeActionById: (id) => { state.actions.push(id); },
+    getAllStudies: () => state.studies.map(({ id, name }) => ({ id, name })),
+    createStudy(name, forceOverlay, lock, inputs) {
+      return new Promise((res) => setTimeout(() => {
+        const def = KNOWN_STUDIES[name];
+        if (!def) return res(null);
+        const id = `st${nextId++}`;
+        state.studies.push({ id, name, inputs: { ...def.inputs, ...(inputs || {}) }, visible: true });
+        draw(); res(id);
+      }, 20));
+    },
+    getStudyById(id) {
+      const s = state.studies.find((x) => x.id === id);
+      if (!s) return null;
+      return {
+        getInputValues: () => Object.entries(s.inputs).map(([id, value]) => ({ id, value })),
+        setInputValues: (vals) => vals.forEach((v) => { s.inputs[v.id] = v.value; }),
+        isVisible: () => s.visible,
+        setVisible: (v) => { s.visible = v; },
+      };
+    },
+    removeEntity(id) {
+      state.studies = state.studies.filter((s) => s.id !== id);
+      state.shapes = state.shapes.filter((s) => s.id !== id);
+      draw();
+    },
+    getAllShapes: () => state.shapes.map(({ id, name }) => ({ id, name })),
+    createShape(point, opts) {
+      if (!ONE_POINT.includes(opts.shape)) return null;
+      const id = `sh${nextId++}`;
+      state.shapes.push({ id, name: opts.shape, points: [point], text: opts.text });
+      draw(); return id;
+    },
+    createMultipointShape(points, opts) {
+      if (!MULTI_POINT.includes(opts.shape) || points.length < 2) return Promise.resolve(null);
+      const id = `sh${nextId++}`;
+      state.shapes.push({ id, name: opts.shape, points });
+      draw(); return Promise.resolve(id);
+    },
+    removeAllShapes: () => { state.shapes = []; draw(); },
+    exportData: async () => ({
+      schema: [
+        { type: "time", sourceType: "chart" },
+        ...["open", "high", "low", "close", "volume"].map((p) => ({ type: "value", sourceType: "series", plotTitle: p, sourceTitle: state.symbol })),
+      ],
+      data: state.bars.map((b) => b.slice()),
+    }),
+  };
+
+  document.addEventListener("keydown", (e) => {
+    const combo = [e.ctrlKey && "Control", e.altKey && "Alt", e.shiftKey && "Shift", e.key.length === 1 ? e.key.toUpperCase() : e.key].filter(Boolean).join("+");
+    state.actions.push(`key:${combo}`);
+  });
+
+  genBars();
+  // Like the real app, the API appears a moment after page load.
+  setTimeout(() => {
+    window.TradingViewApi = { activeChart: () => chart, chartsCount: () => 1 };
+    draw();
+  }, 300);
+})();
+</script>
+</body>
+</html>
